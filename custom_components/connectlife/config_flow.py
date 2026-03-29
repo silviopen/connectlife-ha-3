@@ -40,7 +40,6 @@ async def validate_input(data: dict[str, Any]) -> dict[str, Any]:
     try:
         async with async_timeout.timeout(60):
             await api.login()
-            await api.get_appliances()
     except LifeConnectAuthError as exc:
         raise InvalidAuth from exc
     except TimeoutError as exc:

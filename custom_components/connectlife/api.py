@@ -314,8 +314,9 @@ class ConnectLifeApi:
                 return
             except (aiohttp.ClientError, TimeoutError) as err:
                 if attempt == attempts:
-                    raise LifeConnectAuthError(
-                        f"Unexpected error during login: {err}"
+                    raise LifeConnectError(
+                        f"Unexpected error during login: {err}",
+                        endpoint=self.login_url,
                     ) from err
                 _LOGGER.warning(
                     "ConnectLife login attempt %d/%d failed with transport error, retrying: %s",

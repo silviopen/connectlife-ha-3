@@ -254,6 +254,37 @@ class ConnectLifeApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api._access_token, "new-access-token")
         self.assertFalse(requests)
 
+    async def test_initial_login_transport_error_raises_lifeconnect_error(self) -> None:
+        api = ConnectLifeApi("user@example.com", "secret")
+
+        requests = [
+            (
+                "POST",
+                api.login_url,
+                API_MODULE.aiohttp.ClientConnectionError("connection reset"),
+            ),
+            (
+                "POST",
+                api.login_url,
+                API_MODULE.aiohttp.ClientConnectionError("connection reset"),
+            ),
+        ]
+
+        with patch.object(
+            API_MODULE.aiohttp,
+            "ClientSession",
+            new=FakeClientSessionFactory(requests),
+        ):
+            with patch.object(API_MODULE.asyncio, "sleep", return_value=None):
+                with self.assertRaises(API_MODULE.LifeConnectError) as context:
+                    await api.login()
+
+        self.assertEqual(
+            str(context.exception),
+            "Unexpected error during login: connection reset",
+        )
+        self.assertFalse(requests)
+
     async def test_appliances_request_reauths_after_transient_server_error(self) -> None:
         api = ConnectLifeApi("user@example.com", "secret")
         api._allow_gateway_fallback = False
