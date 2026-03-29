@@ -21,9 +21,11 @@ _LOGGER = logging.getLogger(__name__)
 
 TRANSIENT_STATUSES = frozenset({401, 403, 500, 502, 503, 504})
 AUTH_TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
+GATEWAY_FALLBACK_STATUSES = frozenset({500, 502, 503, 504})
 BAPI_USER_AGENT = "connectlife-api-connector 2.1.4"
 GATEWAY_USER_AGENT = "Runner/2.0.6 (iPhone; iOS 17.2.1; Scale/3.00)"
 GATEWAY_BASE_URL = "https://clife-eu-gateway.hijuconn.com"
+GATEWAY_DEVICE_LIST_URL = f"{GATEWAY_BASE_URL}/clife-svc/pu/get_device_status_list"
 GATEWAY_UPDATE_URL = f"{GATEWAY_BASE_URL}/device/pu/property/set"
 GATEWAY_APP_ID = "47110565134383"
 GATEWAY_APP_SECRET = "yOzhz6junYno-nmULM3Wr7PU_dpSZN22ZdluvVWZ4uW5ZwwG8fIGCHTbrhcnU-iv"
@@ -33,6 +35,7 @@ GATEWAY_VERSION = "5.0"
 GATEWAY_SIGN_SUFFIX = "D9519A4B756946F081B7BB5B5E8D1197"
 GATEWAY_INVALID_ACCESS_TOKEN = 100026
 GATEWAY_RANDSTR_CHECK_FAILED = 101005
+BAPI_APPLIANCES_TIMEOUT = aiohttp.ClientTimeout(total=10)
 GATEWAY_PUBLIC_KEY = cast(
     RSAPublicKey,
     serialization.load_pem_public_key(
@@ -126,7 +129,22 @@ class ConnectLifeApi:
     async def get_appliances_json(self) -> Any:
         """Fetch the appliance list as JSON."""
         await self._fetch_access_token()
-        return await self._request_appliances_json(retry_on_reauth=True)
+        try:
+            return await self._request_appliances_json(retry_on_reauth=True)
+        except LifeConnectAuthError:
+            raise
+        except (aiohttp.ClientError, TimeoutError):
+            _LOGGER.warning(
+                "ConnectLife appliance list request failed via bapi, trying HijuConn gateway..."
+            )
+            return await self._request_gateway_appliances_json(retry_on_reauth=True)
+        except LifeConnectError as err:
+            if not self._should_fallback_to_gateway(err):
+                raise
+            _LOGGER.warning(
+                "ConnectLife appliance list request failed via bapi, trying HijuConn gateway..."
+            )
+            return await self._request_gateway_appliances_json(retry_on_reauth=True)
 
     def _normalize_appliance_payloads(self, appliances: Any) -> Any:
         """Preserve cached status lists and drop incomplete appliance payloads."""
@@ -211,6 +229,7 @@ class ConnectLifeApi:
                     "User-Agent": BAPI_USER_AGENT,
                     "X-Token": self._require_access_token(),
                 },
+                timeout=BAPI_APPLIANCES_TIMEOUT,
             ) as response:
                 if response.status != 200:
                     body = await self._read_response_body(response)
@@ -228,6 +247,26 @@ class ConnectLifeApi:
                         endpoint=self.appliances_url,
                     )
                 return await self._json(response, endpoint=self.appliances_url)
+
+    async def _request_gateway_appliances_json(
+        self,
+        *,
+        retry_on_reauth: bool,
+    ) -> list[dict[str, Any]]:
+        gateway_response = await self._request_gateway_json(
+            GATEWAY_DEVICE_LIST_URL,
+            payload={},
+            retry_on_reauth=retry_on_reauth,
+            retry_on_randstr=False,
+            method="GET",
+        )
+        device_list = gateway_response.get("deviceList")
+        if not isinstance(device_list, list):
+            raise LifeConnectError(
+                "Unexpected response from HijuConn gateway: missing 'deviceList'",
+                endpoint=GATEWAY_DEVICE_LIST_URL,
+            )
+        return device_list
 
     async def _update_bapi_appliance(
         self,
@@ -501,14 +540,26 @@ class ConnectLifeApi:
         payload: dict[str, Any],
         retry_on_reauth: bool,
         retry_on_randstr: bool,
+        method: str = "POST",
     ) -> dict[str, Any]:
         request_data = self._gateway_request_data(payload)
 
         async with self._client_session() as session:
-            async with session.post(
+            request = session.get if method == "GET" else session.post
+            request_kwargs: dict[str, Any]
+            if method == "GET":
+                request_kwargs = {
+                    "params": request_data,
+                    "headers": {"User-Agent": GATEWAY_USER_AGENT},
+                }
+            else:
+                request_kwargs = {
+                    "json": request_data,
+                    "headers": {"User-Agent": GATEWAY_USER_AGENT},
+                }
+            async with request(
                 url,
-                json=request_data,
-                headers={"User-Agent": GATEWAY_USER_AGENT},
+                **request_kwargs,
             ) as response:
                 if response.status != 200:
                     body = await self._read_response_body(response)
@@ -541,6 +592,7 @@ class ConnectLifeApi:
                 payload=payload,
                 retry_on_reauth=False,
                 retry_on_randstr=retry_on_randstr,
+                method=method,
             )
         if retry_on_randstr and error_code == GATEWAY_RANDSTR_CHECK_FAILED:
             _LOGGER.warning(
@@ -551,6 +603,7 @@ class ConnectLifeApi:
                 payload=payload,
                 retry_on_reauth=retry_on_reauth,
                 retry_on_randstr=False,
+                method=method,
             )
 
         error_type = (
@@ -562,6 +615,9 @@ class ConnectLifeApi:
             f"Unexpected response from HijuConn gateway: code={error_code} description='{error_desc}'",
             endpoint=url,
         )
+
+    def _should_fallback_to_gateway(self, err: LifeConnectError) -> bool:
+        return err.endpoint == self.appliances_url and err.status in GATEWAY_FALLBACK_STATUSES
 
     def _set_token_state(self, response: dict[str, Any]) -> None:
         self._access_token = self._require_auth_field(response, "access_token")

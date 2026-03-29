@@ -337,6 +337,173 @@ class ConnectLifeApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api._access_token, "replacement-access-token")
         self.assertFalse(requests)
 
+    async def test_appliances_request_falls_back_to_gateway_after_second_transient_status(self) -> None:
+        api = ConnectLifeApi("user@example.com", "secret")
+        api._access_token = "cached-access-token"
+        api._expires = dt.datetime.now() + dt.timedelta(minutes=5)
+
+        requests = [
+            (
+                "GET",
+                api.appliances_url,
+                FakeResponse(502, "<title>bapi.ovh | 502: Bad gateway</title>"),
+            ),
+            (
+                "POST",
+                api.login_url,
+                FakeResponse(
+                    200,
+                    {"UID": "uid-1", "sessionInfo": {"cookieValue": "login-token"}},
+                ),
+            ),
+            ("POST", api.jwt_url, FakeResponse(200, {"id_token": "jwt-token"})),
+            ("POST", api.oauth2_authorize, FakeResponse(200, {"code": "auth-code"})),
+            (
+                "POST",
+                api.oauth2_token,
+                FakeResponse(
+                    200,
+                    {
+                        "access_token": "replacement-access-token",
+                        "expires_in": 3600,
+                        "refresh_token": "replacement-refresh-token",
+                    },
+                ),
+            ),
+            (
+                "GET",
+                api.appliances_url,
+                FakeResponse(502, "<title>bapi.ovh | 502: Bad gateway</title>"),
+            ),
+            (
+                "GET",
+                API_MODULE.GATEWAY_DEVICE_LIST_URL,
+                FakeResponse(
+                    200,
+                    {
+                        "response": {
+                            "resultCode": 0,
+                            "deviceList": [{"deviceId": "device-1", "statusList": {"power": 1}}],
+                        }
+                    },
+                ),
+            ),
+        ]
+
+        with patch.object(
+            API_MODULE.aiohttp,
+            "ClientSession",
+            new=FakeClientSessionFactory(requests),
+        ):
+            result = await api.get_appliances_json()
+
+        self.assertEqual(result, [{"deviceId": "device-1", "statusList": {"power": 1}}])
+        self.assertEqual(api._access_token, "replacement-access-token")
+        self.assertFalse(requests)
+
+    async def test_appliances_request_falls_back_to_gateway_after_transport_error(self) -> None:
+        api = ConnectLifeApi("user@example.com", "secret")
+        api._access_token = "cached-access-token"
+        api._expires = dt.datetime.now() + dt.timedelta(minutes=5)
+
+        requests = [
+            (
+                "GET",
+                api.appliances_url,
+                API_MODULE.aiohttp.ClientConnectionError("connection reset"),
+            ),
+            (
+                "GET",
+                API_MODULE.GATEWAY_DEVICE_LIST_URL,
+                FakeResponse(
+                    200,
+                    {
+                        "response": {
+                            "resultCode": 0,
+                            "deviceList": [{"deviceId": "device-1", "statusList": {"power": 1}}],
+                        }
+                    },
+                ),
+            ),
+        ]
+
+        with patch.object(
+            API_MODULE.aiohttp,
+            "ClientSession",
+            new=FakeClientSessionFactory(requests),
+        ):
+            result = await api.get_appliances_json()
+
+        self.assertEqual(result, [{"deviceId": "device-1", "statusList": {"power": 1}}])
+        self.assertFalse(requests)
+
+    async def test_gateway_appliances_request_reauths_after_invalid_access_token(self) -> None:
+        api = ConnectLifeApi("user@example.com", "secret")
+        api._access_token = "cached-access-token"
+        api._expires = dt.datetime.now() + dt.timedelta(minutes=5)
+
+        requests = [
+            (
+                "GET",
+                api.appliances_url,
+                API_MODULE.aiohttp.ClientConnectionError("connection reset"),
+            ),
+            (
+                "GET",
+                API_MODULE.GATEWAY_DEVICE_LIST_URL,
+                FakeResponse(
+                    200,
+                    {"response": {"resultCode": 1, "errorCode": 100026, "errorDesc": "invalid access token"}},
+                ),
+            ),
+            (
+                "POST",
+                api.login_url,
+                FakeResponse(
+                    200,
+                    {"UID": "uid-1", "sessionInfo": {"cookieValue": "login-token"}},
+                ),
+            ),
+            ("POST", api.jwt_url, FakeResponse(200, {"id_token": "jwt-token"})),
+            ("POST", api.oauth2_authorize, FakeResponse(200, {"code": "auth-code"})),
+            (
+                "POST",
+                api.oauth2_token,
+                FakeResponse(
+                    200,
+                    {
+                        "access_token": "replacement-access-token",
+                        "expires_in": 3600,
+                        "refresh_token": "replacement-refresh-token",
+                    },
+                ),
+            ),
+            (
+                "GET",
+                API_MODULE.GATEWAY_DEVICE_LIST_URL,
+                FakeResponse(
+                    200,
+                    {
+                        "response": {
+                            "resultCode": 0,
+                            "deviceList": [{"deviceId": "device-1", "statusList": {"power": 1}}],
+                        }
+                    },
+                ),
+            ),
+        ]
+
+        with patch.object(
+            API_MODULE.aiohttp,
+            "ClientSession",
+            new=FakeClientSessionFactory(requests),
+        ):
+            result = await api.get_appliances_json()
+
+        self.assertEqual(result, [{"deviceId": "device-1", "statusList": {"power": 1}}])
+        self.assertEqual(api._access_token, "replacement-access-token")
+        self.assertFalse(requests)
+
     async def test_update_appliance_uses_gateway_before_bapi(self) -> None:
         api = ConnectLifeApi("user@example.com", "secret")
         api._access_token = "cached-access-token"
