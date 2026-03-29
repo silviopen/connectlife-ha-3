@@ -3,13 +3,13 @@ import logging
 from collections.abc import Mapping
 from datetime import timedelta
 
-from connectlife.api import LifeConnectAuthError, LifeConnectError, ConnectLifeApi
 from connectlife.appliance import ConnectLifeAppliance
 from homeassistant.const import Platform
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .api import ConnectLifeApi, LifeConnectAuthError, LifeConnectError
 from .const import DOMAIN
 from .messages import format_retry_message
 
@@ -76,7 +76,12 @@ class ConnectLifeCoordinator(DataUpdateCoordinator[dict[str, ConnectLifeApplianc
 
     async def async_update_device(self, device_id: str, command: Mapping[str, int | str], properties: Mapping[str, int | str]):
         """Updates the device, and sets the properties in local copy and notify to avoid refetching."""
-        await self.api.update_appliance(self.data[device_id].puid, {k: str(v) for k, v in command.items()})
+        try:
+            await self.api.update_appliance(self.data[device_id].puid, {k: str(v) for k, v in command.items()})
+        except LifeConnectAuthError as err:
+            raise HomeAssistantError("ConnectLife authentication failed while updating the device") from err
+        except LifeConnectError as err:
+            raise HomeAssistantError(str(err)) from err
         self.data[device_id].status_list.update(properties)
         self.async_update_listeners()
 
